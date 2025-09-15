@@ -24,21 +24,24 @@
 ## 🧭 시스템 아키텍처
 
 ```
-OV7670 ──(PCLK/HREF/VSYNC/D[7:0])──▶ [Basys3]
-  │                                    │
-  │   (SCCB/I2C 설정)                   │  ┌─────────────────────────┐
-  └──────────────▶ OV7670_Master ─────▶  │  OV7670_MemController    │
-                                         │  (RGB565 캡처, 320×240)  │
-                                         └──────────┬───────────────┘
-                                                    ▼
-                                        frame_buffer (BRAM, 320×240)
-                                        ├─ VGA_MemController ──▶ VGA 포트(4:4:4)
-                                        └─ 3×3 RED 감지 → led[8:0], UART 9bit TX
+OV7670 ──(PCLK/HREF/VSYNC/D[7:0])──▶ Basys3 (Artix-7)
+  │                                     │
+  │   (SCCB / I2C 설정)                  │   ┌──────────────────────────────┐
+  └──────────────▶ OV7670_Master ───────▶   │  OV7670_MemController         │
+                                            │  (RGB565 capture @ 320×240)   │
+                                            └───────────┬───────────────────┘
+                                                        ▼
+                                            frame_buffer (BRAM, 320×240 RGB565)
+                                             ├─▶ VGA_MemController ──▶ VGA 4:4:4
+                                             │
+                                             │             VGA(640×480) ──▶ HDMI 어댑터 ──▶ 모니터
+                                             │
+                                             └─▶ 3×3 RED 감지 ──▶ led[8:0] ──▶ Basys3 LED 패널
+                                                      │
+                                                      └─▶ UART TX (9N1, 9-bit)
+                                                            └──▶ STM32 Nucleo USART1_RX (PA10) ──▶ 터렛 제어
 
-                               VGA(640×480) ──▶ HDMI 어댑터 ──▶ 모니터
 
-led[8:0] (Basys3) ────────▶ LED 패널
-UART TX(9N1) ─────────────▶ STM32 Nucleo USART1_RX(PA10) ──▶ 터렛 제어
 ```
 
 ---
