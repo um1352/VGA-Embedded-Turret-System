@@ -1,23 +1,24 @@
 # 🔴 적 식별 방산 터렛 (Basys3 + OV7670 + STM32)
 
-> **Vision + FPGA + MCU**: OV7670 카메라로 빨간색(RED)을 감지해 3×3 구역으로 표적을 표시하고, 9비트 UART로 STM32 터렛 제어까지! 🚀
+> **Vision + FPGA + MCU + PC HUD**: OV7670 카메라로 빨간색(RED)을 감지해 3×3 구역 타겟을 만들고, Basys3가 9비트 패턴을 송신 → STM32가 서보·모터로 터렛 시퀀스를 수행 → PC(PyQt HUD)가 상황을 시각화합니다.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Board-Basys3%20(Artix--7)-blue" />
   <img src="https://img.shields.io/badge/Camera-OV7670-green" />
   <img src="https://img.shields.io/badge/MCU-STM32%20Nucleo-orange" />
   <img src="https://img.shields.io/badge/Interface-UART%209N1%20(9--bit)-purple" />
+  <img src="https://img.shields.io/badge/PC-PyQt5%20HUD-lightgrey" />
 </p>
 
 ---
 
-## ✨ 프로젝트 한눈에 보기 (TL;DR)
+## ✨ TL;DR
 
-* **주제**: 적(RED) 색상 자동 식별 방산 터렛
-* **알고리즘**: RGB444 표시 기준의 **빨간색(R)** 우세성 검사 (내부 처리 RGB565 기반)
-* **하드웨어**: **Basys3 + OV7670**로 영상처리 & 3×3 구역 LED 표시 → **STM32 Nucleo**와 **9비트 UART** 통신
-* **디스플레이**: Basys3 **VGA → HDMI 어댑터**로 모니터 연결 (640×480\@60Hz)
-* **목표(차기)**: Nucleo가 수신한 9비트 패턴(예: `9'b101_101_101`)을 해석해 **터렛(서보/발사 장치)** 를 순차 제어
+* **주제**: RED 색상 자동 식별 및 3×3 구역 기반 터렛 제어
+* **영상처리**: RGB565 프레임버퍼에서 9구역 ROI별 RED 우세성(5×5 윈도 평균) 판단
+* **표시**: Basys3 VGA 640×480(×2 스케일) + GUI 오버레이 옵션
+* **통신**: Basys3 → STM32 **9N1(9-bit) UART**, PC HUD는 시리얼 패킷(저/고/\n) 수신 표시
+* **제어**: STM32가 **최소 이동 경로 기반**으로 목표 구역을 순차 방문·발사, **부드러운 서보 이동**
 
 ---
 
@@ -26,178 +27,147 @@
 ```
 OV7670 ──(PCLK/HREF/VSYNC/D[7:0])──▶ Basys3 (Artix-7)
   │                                     │
-  │   (SCCB / I2C 설정)                  │   ┌──────────────────────────────┐
-  └──────────────▶ OV7670_Master ───────▶   │  OV7670_MemController         │
+  │  (SCCB 설정)                         │   ┌──────────────────────────────┐
+  └────────▶ SCCB_Core ────────────────▶   │  OV7670_MemController         │
                                             │  (RGB565 capture @ 320×240)   │
                                             └───────────┬───────────────────┘
                                                         ▼
                                             frame_buffer (BRAM, 320×240 RGB565)
-                                             ├─▶ VGA_MemController ──▶ VGA 4:4:4
-                                             │
-                                             │             VGA(640×480) ──▶ HDMI 어댑터 ──▶ 모니터
-                                             │
-                                             └─▶ 3×3 RED 감지 ──▶ led[8:0] ──▶ Basys3 LED 패널
-                                                      │
-                                                      └─▶ UART TX (9N1, 9-bit)
-                                                            └──▶ STM32 Nucleo USART1_RX (PA10) ──▶ 터렛 제어
+                                             ├─▶ VGA_MemController ─▶ VGA(640×480)
+                                             └─▶ 3×3 RED Detect ─▶ led[8:0]
+                                                                └─▶ UART(9N1)
+                                                                     └─▶ STM32(USART1_RX)
+                                                                             └─▶ Pan/Tilt Servo, Fire 모터
 
-
+PC(PyQt HUD) ◀─────(USB-Serial, LED 패턴 패킷 수신·표시)─────── Basys3/STM32
 ```
 
 ---
 
-## 📦 저장소 구조 & 역할
+## 📦 저장소 구조 (16개)
 
-> 업로드된 주요 SystemVerilog 파일을 **모듈 단위**로 설명합니다.
+| 경로/파일                     | 역할 요약                                                |
+| ------------------------- | ---------------------------------------------------- |
+| `VGA_Camera_Display.sv`   | Top(표시 파이프라인 허브): 모드 선택(원본/그레이/GUI), XCLK/서브모듈 연결    |
+| `OV7670_MemController.sv` | OV7670 8bit 스트림을 RGB565로 조립, 320×240 쓰기 주소/WE 생성     |
+| `frame_buffer.sv`         | 듀얼포트 BRAM 프레임버퍼. VGA에서 읽고, 내부에서 **9구역 RED 감지** 비트 생성 |
+| `VGA_MemController.sv`    | VGA 좌표→메모리 주소 변환(×2 스케일), RGB444 출력                  |
+| `VGA_Decoder.sv`          | 640×480\@60Hz 타이밍(hsync/vsync/DE, x/y 카운터)           |
+| `SCCB_Core.sv`            | OV7670 초기설정 I²C(SCCB) 400kHz 상태기계                    |
+| `GrayScaleFilter.sv`      | RGB→그레이 변환 모듈(옵션 표시 모드)                              |
+| `GUIMaker.sv`             | 3×3 그리드·표적 오버레이 렌더                                   |
+| `VGA_Camera_Display.sv`   | (상동) 최상위 표시 및 모듈 연결 허브                               |
+| `top_uart9_basys3.sv`     | Basys3 9비트 UART 송신 Top(버튼/디바운스 포함)                   |
+| `usb_uart.sv`             | FPGA UART 보조(테스트/브릿지에 사용)                            |
+| `button_detector.sv`      | 버튼 디바운스·에지 검출                                        |
+| `test_buffer.sv`          | 9구역 디텍션 안정화(카운터/임계) 및 LED 매핑 실험                      |
+| `Basys-3-Master.xdc`      | 핀 매핑·보드 제약 XDC                                       |
+| `STM32/main.c, main.h`    | 터렛 제어(서보/모터), 9비트 수신, **최적 경로 실행/실시간 추적** 모드         |
+| `PC/main.py`              | PyQt HUD(카메라 보기+3×3 오버레이), 시리얼 패킷 수신 로그              |
 
-| 파일                        | 핵심 역할                                                                                                             | 비고                         |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| `VGA_Camera_Display.sv`   | **Top (FPGA)**. 카메라 캡처 → 프레임버퍼 → VGA 출력 파이프라인을 연결하고, 표시 모드(원본/그레이/GUI)를 선택.                                       | XCLK 생성, 서브모듈 인스턴스 연결 허브   |
-| `OV7670_MemController.sv` | OV7670 8bit 버스에서 **RGB565 픽셀 조립** 및 **다운샘플(640×480 → 320×240)** 후 BRAM 주소/데이터/WE 생성.                              | HREF/VSYNC 카운터로 `wAddr` 증가 |
-| `frame_buffer.sv`         | 듀얼 포트 **프레임버퍼(BRAM)**. 카메라 도메인(wclk)에서 쓰기, VGA 도메인에서 읽기. 동시에 **3×3 구역 RED 감지**(5×5 윈도우 평균 기반) 수행, `data[8:0]` 출력. | RED 판정 파라미터 제공(아래 참조)      |
-| `VGA_MemController.sv`    | VGA 타이밍 `DE/x/y`로부터 **320×240 메모리 주소 생성** 후 픽셀을 **4:4:4로 변환**해 Basys3 VGA 포트에 출력.                                 | 픽셀 복제(×2)로 640×480 화면 채움   |
-| `VGA_Decoder.sv`          | **640×480\@60Hz 타이밍** 생성. `h_sync/v_sync/DE`와 `x_pixel/y_pixel` 카운터, `pclk/fclk` 제공.                              | 표준 VGA 파라미터                |
-| `SCCB_Core.sv`            | `OV7670_Master`: SCCB(I²C 유사) **400kHz** 상태기계. **레지스터 ROM**에 정의된 시퀀스로 OV7670 초기화(RGB565, 클럭/감마 등).                | `startSig`로 시퀀스 시작         |
-| `GrayScaleFilter.sv`      | RGB444 입력을 그레이스케일로 변환(`gray = 77R + 154G + 25B`, 12bit → 상위 4bit 복제).                                             | 표시 모드 2에서 사용               |
-| `GUIMaker.sv`             | VGA 좌표로 **3×3 그리드/표적(원)** 오버레이. 빨간색 타겟/초록색 그리드 등 시각화.                                                             | 필요 시 코멘트 해제하여 사용           |
-| `top_uart9_basys3.sv`     | **9비트 UART 송신 Top**. 버튼 트리거/디바운스 + `uart9_tx`로 `data_detect[8:0]` 패턴을 전송.                                         | Nucleo 연동용                 |
-| `test_buffer.sv`          | 9개 구역의 감지 카운터/임계 기반 **안정화(디바운스)** 후 `led[8:0]` 점등.                                                                | 실험용 필터                     |
-
-> **참고**: `button_detector`, `uart9_tx` 등 보조 모듈은 별도 파일/프로젝트에 있을 수 있습니다.
-
----
-
-## 🔎 RED 식별 알고리즘 (5×5 윈도우 평균)
-
-* 프레임버퍼는 RGB565(5-6-5) 포맷으로 저장합니다.
-* 각 구역(zone)마다 5×5 픽셀의 합을 누적한 뒤, **나눗셈 없이** 임계값과 비교(25배 스케일)로 평균 조건을 검사합니다.
-
-**파라미터(예시, `frame_buffer.sv`)**
-
-* `R_MIN = 10` (0..31) : 빨강 평균 하한
-* `G_MAX = 32` (0..63) : 초록 평균 상한
-* `B_MAX = 16` (0..31) : 파랑 평균 상한
-* `R_MINUS_G = 4` : `R - (G/2) ≥ 4`
-* `R_MINUS_B = 4` : `R - B ≥ 4`
-* `SCALE = 25` : 5×5 샘플 개수
-
-**판정식(스케일 비교)**
-
-```
-(sumR ≥ 25·R_MIN) ∧ (sumG ≤ 25·G_MAX) ∧ (sumB ≤ 25·B_MAX)
-∧ ((sumR − sumG/2) ≥ 25·R_MINUS_G) ∧ ((sumR − sumB) ≥ 25·R_MINUS_B)
-```
-
-* 조건을 만족하면 해당 구역의 `data[k] = 1` → **LED/ UART 비트 셋**
-
-> 구역은 화면 3×3 분할(9분할)이며, 각 구역 내부에 **5×5 픽셀 ROI**를 지정해 빠르고 가벼운 연산으로 실시간 판단합니다.
+> 세부 파라미터/레지스터 시퀀스는 소스 주석 참고.
 
 ---
 
-## 🖥️ 디스플레이 파이프라인
+## 🔎 RED 감지 로직(개요)
 
-1. **카메라 캡처**: `OV7670_MemController`가 HREF/VSYNC에 따라 RGB565 픽셀을 순차 저장 (320×240)
-2. **프레임버퍼 읽기**: `VGA_MemController`가 VGA 타이밍(`DE/x/y`)을 1/2 스케일 주소로 변환해 픽셀을 읽고, **RGB444**로 매핑
-3. **필터/GUI**: 선택에 따라 원본/그레이/GUI 오버레이 표시 (`VGA_Camera_Display`)
-4. **출력**: Basys3 VGA 포트 → (VGA→HDMI 어댑터) → 모니터
+* 포맷: RGB565(5-6-5)
+* 각 구역에 5×5 ROI 샘플 합을 누적 → **나눗셈 없이** 임계 비교(×25 스케일)
+* 예시 조건: `R ≥ R_MIN`, `G ≤ G_MAX`, `B ≤ B_MAX`, `R−G/2 ≥ a`, `R−B ≥ b`
+* 충족 시 해당 구역 비트 셋 → `led[8:0]` / UART 9비트 전송
 
 ---
 
-## 🔩 하드웨어 결선 (요약)
+## 🧾 9비트 UART 프로토콜
 
-> 보드는 **3.3V 로직**입니다. GND는 **공통**!
+* 프레임: **9N1** (9 data, no parity, 1 stop)
+* 비트 맵(MSB→LSB): `[TL, TM, TR, ML, MM, MR, BL, BM, BR]`
+* 예: `9'b101_101_101` (1,3,4,6,7,9 구역)
+
+> STM32는 USART1 **RX 전용(9-bit)** 로 수신, PC HUD는 (저/고/\n) 3바이트 패킷을 읽어 9비트로 재조합(테스트/모니터링용).
+
+---
+
+## 🖥️ 디스플레이 & HUD
+
+* **FPGA VGA**: 320×240 프레임버퍼를 640×480으로 스케일 출력, 그레이/GUI 오버레이 옵션
+* **PC(PyQt HUD)**: 웹캠/캡처 영상 위에 3×3 그리드를 오버레이, 시리얼 패킷을 수신해 로그 창에 구역 번호를 실시간 표시
+* HUD 단축키: `H` → 화질 개선 토글(블러+감마+샤프닝)
+
+---
+
+## 🔩 하드웨어 결선 요약
 
 ### OV7670 ↔ Basys3
 
-| OV7670     | Basys3 | 설명                  |
-| ---------- | ------ | ------------------- |
-| XCLK       | FPGA 핀 | 카메라 구동 클럭(25MHz 내외) |
-| PCLK       | FPGA 핀 | 픽셀 클럭               |
-| VSYNC/HREF | FPGA 핀 | 프레임/라인 동기           |
-| D\[7:0]    | FPGA 핀 | 픽셀 데이터              |
-| SIOC/SIOD  | FPGA 핀 | SCCB(I²C 유사) 설정     |
-
-> 정확한 핀네임은 보드 XDC에 맞춰 조정하세요.
+* XCLK, PCLK, VSYNC/HREF, D\[7:0], SIOC/SIOD(SCCB)
+* 3.3V 로직, GND 공통
 
 ### Basys3 VGA → 모니터
 
-* Basys3 VGA 4:4:4 → **VGA to HDMI 어댑터** → 모니터 입력 (해상도 640×480\@60)
+* 4:4:4 VGA → (VGA→HDMI 어댑터) → 640×480\@60Hz
 
-### Basys3 ↔ STM32 (UART 9-bit)
+### Basys3 ↔ STM32
 
-| Basys3    | STM32 Nucleo       | 비고                             |
-| --------- | ------------------ | ------------------------------ |
-| `uart_tx` | `PA10 (USART1_RX)` | **9N1**, 115200 (초기엔 38400 권장) |
-| GND       | GND                | 공통 그라운드                        |
-
-> Nucleo에서 **USART2(PA2/PA3)** 는 기본적으로 **ST-LINK VCP**에 연결되어 충돌 위험이 있으니 **USART1**(PA10/PA9) 사용을 권장합니다.
-
----
-
-## 🧾 9비트 UART 프로토콜 (Basys3 → STM32)
-
-* 프레임: **9N1 (9 data, No parity, 1 stop)**
-* 비트 맵(상위→하위): `[TL, TM, TR, ML, MM, MR, BL, BM, BR]`
-  (T/M/B: Top/Middle/Bottom, L/M/R: Left/Middle/Right)
-* 예시
-
-  * `9'b111_000_000` → 상단 3구역 모두 RED
-  * `9'b101_101_101` → **1,3,4,6,7,9** 구역 RED (목표 시나리오)
-  * `9'b100_000_001` → 좌상, 우하 RED
-
-STM32 측 비교 예시(수신값 `rx`는 9비트 마스크 필요):
-
-```c
-if ((rx & 0x01FF) == 0x101) { /* TL & BR */ }
-```
+* `uart_tx` → `PA10 (USART1_RX)` (Nucleo)
+* **GND 공통**, 9N1 설정 일치
 
 ---
 
 ## 🛠️ 빌드 & 실행
 
-### FPGA (Vivado)
+### 1) FPGA (Vivado)
 
-1. 보드: **Digilent Basys3 (Artix-7)** 선택
-2. 소스 추가: 본 저장소의 `.sv` 파일들 + 보조 모듈(`uart9_tx`, `button_detector` 등)
-3. 제약(XDC): OV7670, VGA, UART 핀 매핑 반영
-4. 합성/구현/비트스트림 생성 → **프로그램**
+1. 보드: Digilent **Basys3 (Artix‑7)**
+2. 소스 추가: `.sv` + `Basys-3-Master.xdc`
+3. 합성/구현/비트스트림 → 프로그래밍
 
-### MCU (STM32CubeIDE)
+### 2) STM32 (STM32CubeIDE)
 
-1. 보드: **Nucleo-F401RE/F411RE** 등
-2. `USART1` 활성화, **WordLength: 9B**, **Parity: None**, **Mode: RX**
-3. 핀: `PA10=USART1_RX(AF7)`
-4. 수신 루프: `HAL_UART_Receive(&huart1, (uint8_t*)&rx, 1, timeout)` → `rx &= 0x01FF` 후 매핑 처리
+1. 보드: Nucleo‑F401RE/F411RE 등
+2. `USART1`: **9-bit, Parity None, Stop 1**, **RX only**, Baud **115200** 권장
+3. PWM 타이머: Pan/Tilt/Fire 서보, 모터 채널 설정
+
+### 3) PC HUD (Python 3.9+)
+
+```bash
+pip install pyqt5 opencv-python pyserial numpy
+python main.py
+```
+
+* `SerialThread`의 포트(`COM7`)와 Baud를 실제 환경에 맞게 수정
 
 ---
 
-## 🧪 디버깅 팁
+## 🧪 운용/디버깅 팁
 
-* **VGA 동기**: 패턴/그리드가 어긋나면 `VGA_Decoder` 타이밍 상수 확인
-* **카메라**: SCCB 시퀀스가 모두 쓰였는지(`0xFFFF` 종료)와 XCLK 주파수 확인
-* **RED 감지**: `R_MIN/G_MAX/B_MAX`/`R_MINUS_G/B` 값 튜닝 (조명/노이즈 환경에 맞춤)
-* **UART**: 라인 공통 GND, 9N1 설정 일치, 오버런(ORE) 클리어
+* **모드 스위치**: `PC0=HIGH` → UART 패턴 기반 **최적 경로+발사**, `PC0=LOW` → **실시간 추적(발사 없음)**
+* **서보 튜닝**: 이동 스텝 딜레이(기본 50ms)로 부드러움/속도 조절
+* **RED 파라미터**: 조도에 따라 `R_MIN`, `R−G/2`, `R−B` 등 임계 재튜닝
+* **UART**: 9N1 매칭, 라인 GND, 오버런/프레이밍 에러 확인
+* **VGA 타이밍**: 싱크 어긋나면 타이밍 상수 재확인
+
+---
+
+## ⚠️ 설정 주의 (Baud/포맷 일치)
+
+* STM32 USART1: **115200 / 9N1 / RX only**
+* PC HUD 기본값: `COM7`, **9600 / 8N1 (패킷 3바이트)** → 테스트/모니터링 용도
+* 실제 동작 시 **Baud/포맷을 통일**하거나, HUD를 115200/9-bit 환경에 맞게 조정 필요
 
 ---
 
 ## 🚀 Roadmap
 
-* [ ] 터렛(서보 2축 + 발사기) **시퀀스 제어** (예: `101_101_101` → 1→3→4→6→7→9 순차 발사)
-* [ ] RED 외 색상/형태 감지로 확장
-* [ ] 스트리밍/기록(AXI-Stream, DMA) 추가
-* [ ] 간단한 Kalman/Tracker로 표적 추적
+* [ ] 터렛 시퀀스 고급화(연속 표적, 우선순위/재인식)
+* [ ] 색상·형태 감지 다중화(RED 외)
+* [ ] 간단 추적기(Kalman/EMA) 적용
+* [ ] AXI-Stream/DMA 캡처·기록
 
 ---
 
-## 📚 주석/참고
+## 📝 License
 
-* GUI/그레이 모듈은 필요 시 표시 파이프라인에 인서트하여 시각화에 활용
-* XDC/핀맵은 보드 리비전에 따라 상이할 수 있으므로 실물 실크/매뉴얼 기준으로 업데이트 권장
+MIT (또는 프로젝트 정책)
 
----
-
-## 📝 라이선스
-
-MIT 혹은 프로젝트 정책에 맞게 지정하세요.
-
-> *“Identify ➜ Decide ➜ Engage” — 가벼운 하드웨어 가속 영상처리로 실시간 표적 인지/제어를 구현했습니다.*
+> *Identify → Decide → Engage* — 저지연 하드웨어 가속으로 실시간 표적 인지·제어를 구현합니다.
